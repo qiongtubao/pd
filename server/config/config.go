@@ -68,6 +68,11 @@ type Config struct {
 	// in etcd after lease time, etcd will expire the leader key
 	// and other servers can campaign the leader again.
 	// Etcd only supports seconds TTL, so here is second too.
+	// LeaderLease时间，如果leader没有更新它的TTL
+	// 在etcd中，租约时间过后，etcd将使leader key过期
+	// 并且其他服务器可以再次竞选领导者。
+	// Etcd只支持秒TTL，所以这里也是秒。
+	// PD Leader Key 租约超时。超时后，系统重新选举Leader。
 	LeaderLease int64 `toml:"lease" json:"lease"`
 
 	// Log related config.
@@ -130,6 +135,16 @@ type Config struct {
 	// the unit defaults to hour. For example, '5' translates into 5-hour.
 	// The default retention is 1 hour.
 	// Before etcd v3.3.x, the type of retention is int. We add 'v2' suffix to make it backward compatible.
+	// AutoCompactionRetention 是带有时间单位的持续时间字符串
+	//（例如“5m”表示 5 分钟），或修订单位（例如“5000”）。
+	// 如果没有提供时间单位并且压缩模式为“periodic”，
+	// 单位默认为小时。 例如，“5”翻译为 5 小时。
+	// 默认保留时间为 1 小时。
+	// 在etcd v3.3.x之前，保留的类型是int。 我们添加“v2”后缀以使其向后兼容。
+	//auto-compaction-retention
+	// 当auto-compaction-mode设置为 periodic。  该参数是元信息数据库自动压缩的时间间隔
+	// 当auto-compaction-mode设置为 revision，  该参数表示自动压缩的版本号。
+	//默认值：1小时
 	AutoCompactionRetention string `toml:"auto-compaction-retention" json:"auto-compaction-retention-v2"`
 
 	// TickInterval is the interval for etcd Raft tick.
@@ -273,12 +288,14 @@ func initByLDFlags(edition string) {
 }
 
 // Parse parses flag definitions from the argument list.
+//解析命令行
 func (c *Config) Parse(flagSet *pflag.FlagSet) error {
 	// Load config file if specified.
 	var (
 		meta *toml.MetaData
 		err  error
 	)
+	//加载config配置的文件
 	if configFile, _ := flagSet.GetString("config"); configFile != "" {
 		meta, err = configutil.ConfigFromFile(c, configFile)
 		if err != nil {
@@ -286,6 +303,7 @@ func (c *Config) Parse(flagSet *pflag.FlagSet) error {
 		}
 
 		// Backward compatibility for toml config
+		// 设置日志文件
 		if c.LogFileDeprecated != "" {
 			msg := fmt.Sprintf("log-file in %s is deprecated, use [log.file] instead", configFile)
 			c.WarningMsgs = append(c.WarningMsgs, msg)
@@ -293,6 +311,7 @@ func (c *Config) Parse(flagSet *pflag.FlagSet) error {
 				c.Log.File.Filename = c.LogFileDeprecated
 			}
 		}
+		//设置日志等级
 		if c.LogLevelDeprecated != "" {
 			msg := fmt.Sprintf("log-level in %s is deprecated, use [log] instead", configFile)
 			c.WarningMsgs = append(c.WarningMsgs, msg)
@@ -300,6 +319,7 @@ func (c *Config) Parse(flagSet *pflag.FlagSet) error {
 				c.Log.Level = c.LogLevelDeprecated
 			}
 		}
+		//关闭 raft learner 功能
 		if meta.IsDefined("schedule", "disable-raft-learner") {
 			msg := fmt.Sprintf("disable-raft-learner in %s is deprecated", configFile)
 			c.WarningMsgs = append(c.WarningMsgs, msg)
@@ -703,6 +723,7 @@ func (c *Config) GetTLSConfig() *grpcutil.TLSConfig {
 }
 
 // GenEmbedEtcdConfig generates a configuration for embedded etcd.
+//嵌入式的etcd 配置
 func (c *Config) GenEmbedEtcdConfig() (*embed.Config, error) {
 	cfg := embed.NewConfig()
 	cfg.Name = c.Name

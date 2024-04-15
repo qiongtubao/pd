@@ -320,7 +320,7 @@ func CreateServer(ctx context.Context, cfg *config.Config, services []string, le
 func (s *Server) startEtcd(ctx context.Context) error {
 	newCtx, cancel := context.WithTimeout(ctx, EtcdStartTimeout)
 	defer cancel()
-
+	//启动etcd 对外提供服务
 	etcd, err := embed.StartEtcd(s.etcdCfg)
 	if err != nil {
 		return errs.ErrStartEtcd.Wrap(err).GenWithStackByCause()
@@ -331,6 +331,7 @@ func (s *Server) startEtcd(ctx context.Context) error {
 	if err != nil {
 		return errs.ErrEtcdURLMap.Wrap(err).GenWithStackByCause()
 	}
+	//安全相关配置项。
 	tlsConfig, err := s.cfg.Security.ToTLSConfig()
 	if err != nil {
 		return err
@@ -340,6 +341,7 @@ func (s *Server) startEtcd(ctx context.Context) error {
 		return err
 	}
 
+	//等待etcd选主完成,通过等待channel (etcd.Server.ReadyNotify()),这个channel收到通知表明etcd cluster 完成选主，可以对外提供服务
 	select {
 	// Wait etcd until it is ready to use
 	case <-etcd.Server.ReadyNotify():
@@ -380,11 +382,13 @@ func (s *Server) startClient() error {
 	}
 	/* Starting two different etcd clients here is to avoid the throttling. */
 	// This etcd client will be used to access the etcd cluster to read and write all kinds of meta data.
+	// 这个etcd客户端将用于访问etcd集群来读取和写入各种元数据。
 	s.client, err = etcdutil.CreateEtcdClient(tlsConfig, etcdCfg.ACUrls, "server-etcd-client")
 	if err != nil {
 		return errs.ErrNewEtcdClient.Wrap(err).GenWithStackByCause()
 	}
 	// This etcd client will only be used to read and write the election-related data, such as leader key.
+	// 该etcd客户端将仅用于读写与选举相关的数据，例如leader key。
 	s.electionClient, err = etcdutil.CreateEtcdClient(tlsConfig, etcdCfg.ACUrls, "election-etcd-client")
 	if err != nil {
 		return errs.ErrNewEtcdClient.Wrap(err).GenWithStackByCause()
@@ -577,10 +581,12 @@ func (s *Server) IsClosed() bool {
 
 // Run runs the pd server.
 func (s *Server) Run() error {
+	//监控时间是否回滚
 	go systimemon.StartMonitor(s.ctx, time.Now, func() {
 		log.Error("system time jumps backward", errs.ZapError(errs.ErrIncorrectSystemTime))
 		timeJumpBackCounter.Inc()
 	})
+	//启动etcd 服务器
 	if err := s.startEtcd(s.ctx); err != nil {
 		return err
 	}
@@ -620,12 +626,20 @@ func (s *Server) LoopContext() context.Context {
 func (s *Server) startServerLoop(ctx context.Context) {
 	s.serverLoopCtx, s.serverLoopCancel = context.WithCancel(ctx)
 	s.serverLoopWg.Add(4)
+	//pd leader 
 	go s.leaderLoop()
+	//etcd leader 
 	go s.etcdLeaderLoop()
+	//指标
 	go s.serverMetricsLoop()
+	//加密密钥管理器
 	go s.encryptionKeyManagerLoop()
+	
+	//如果是API服务模式
 	if s.IsAPIServiceMode() {
+		// 初始化tso主观观察者
 		s.initTSOPrimaryWatcher()
+		// 初始化调度主观察者
 		s.initSchedulingPrimaryWatcher()
 	}
 }
@@ -1569,6 +1583,7 @@ func (s *Server) leaderLoop() {
 	defer s.serverLoopWg.Done()
 
 	for {
+		//服务关闭 跳出循环
 		if s.IsClosed() {
 			log.Info(fmt.Sprintf("server is closed, return %s leader loop", s.mode))
 			return

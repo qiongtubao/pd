@@ -36,11 +36,15 @@ const pickedCountThreshold = 3
 // The etcd client inside will only maintain one connection to the etcd server
 // to make sure each healthyClient could be used to check the health of a certain
 // etcd endpoint without involving the load balancer of etcd client.
+// healthyClient将包装一个etcd客户端并记录其最后的健康时间。
+// 里面的etcd客户端只会与etcd服务器保持一个连接
+// 确保每个healthyClient都可以用来检查某个客户端的健康状况
+// etcd 端点，不涉及 etcd 客户端的负载均衡器。
 type healthyClient struct {
-	*clientv3.Client
-	lastHealth  time.Time
-	healthState prometheus.Gauge
-	latency     prometheus.Observer
+	*clientv3.Client //etcd 客户端
+	lastHealth  time.Time //最后健康的时间戳
+	healthState prometheus.Gauge //数字指标 为了对外查询状态
+	latency     prometheus.Observer //直方图向量指标
 }
 
 // healthChecker is used to check the health of etcd endpoints. Inside the checker,
@@ -64,6 +68,7 @@ type healthChecker struct {
 }
 
 // initHealthChecker initializes the health checker for etcd client.
+//初始化自动检查
 func initHealthChecker(
 	tickerInterval time.Duration,
 	tlsConfig *tls.Config,
@@ -78,13 +83,17 @@ func initHealthChecker(
 		endpointCountState: etcdStateGauge.WithLabelValues(source, endpointLabel),
 	}
 	// A health checker has the same lifetime with the given etcd client.
+	// 健康检查器与给定的 etcd 客户端具有相同的生命周期。
 	ctx := client.Ctx()
 	// Sync etcd endpoints and check the last health time of each endpoint periodically.
+	// 同步etcd端点并定期检查每个端点的最后健康时间。
 	go healthChecker.syncer(ctx)
 	// Inspect the health of each endpoint by reading the health key periodically.
+	// 通过定期读取健康密钥来检查每个端点的健康状况。
 	go healthChecker.inspector(ctx)
 }
 
+//定时更新
 func (checker *healthChecker) syncer(ctx context.Context) {
 	defer logutil.LogPanic()
 	checker.update()
@@ -107,21 +116,30 @@ func (checker *healthChecker) inspector(ctx context.Context) {
 	ticker := time.NewTicker(checker.tickerInterval)
 	defer ticker.Stop()
 	lastAvailable := time.Now()
+	//一直循环
 	for {
 		select {
 		case <-ctx.Done():
+			//接受到ctx Done etcd客户端关闭，退出健康检查器goroutine
 			log.Info("etcd client is closed, exit the health inspector goroutine",
 				zap.String("source", checker.source))
 			checker.close()
 			return
 		case <-ticker.C:
+			//定时器触发 然后进行检查巡检状态
 			lastEps, pickedEps, changed := checker.patrol(ctx)
 			if len(pickedEps) == 0 {
+				//重置端点
 				// when no endpoint could be used, try to reset endpoints to update connect rather
 				// than delete them to avoid there is no any endpoint in client.
 				// Note: reset endpoints will trigger sub-connection closed, and then trigger reconnection.
 				// Otherwise, the sub-connection will be retrying in gRPC layer and use exponential backoff,
 				// and it cannot recover as soon as possible.
+				// 当没有端点可以使用时，尝试重置端点以更新连接
+				// 删除它们以避免客户端中没有任何端点。
+				// 注意：重置端点会触发子连接关闭，然后触发重连。
+				// 否则，子连接将在 gRPC 层重试并使用指数退避，
+				// 并且无法尽快恢复。
 				if time.Since(lastAvailable) > etcdServerDisconnectedTimeout {
 					log.Info("no available endpoint, try to reset endpoints",
 						zap.Strings("last-endpoints", lastEps),
@@ -132,8 +150,11 @@ func (checker *healthChecker) inspector(ctx context.Context) {
 			}
 			if changed {
 				oldNum, newNum := len(lastEps), len(pickedEps)
+				//设置pd list
 				checker.client.SetEndpoints(pickedEps...)
+				//设置检查个数
 				checker.endpointCountState.Set(float64(newNum))
+				//变更pd 日志打印
 				log.Info("update endpoints",
 					zap.String("num-change", fmt.Sprintf("%d->%d", oldNum, newNum)),
 					zap.Strings("last-endpoints", lastEps),
@@ -172,6 +193,7 @@ func (checker *healthChecker) patrol(ctx context.Context) ([]string, []string, b
 		probeCh = make(chan healthProbe, count)
 		wg      sync.WaitGroup
 	)
+	//遍历healthyClients key(string), value (healthyClient)
 	checker.healthyClients.Range(func(key, value any) bool {
 		wg.Add(1)
 		go func(key, value any) {
@@ -187,6 +209,7 @@ func (checker *healthChecker) patrol(ctx context.Context) ([]string, []string, b
 			)
 			// Check the health of the endpoint.
 			healthy := IsHealthy(ctx, client)
+			//记录耗时
 			took := time.Since(start)
 			latency.Observe(took.Seconds())
 			if !healthy {
@@ -199,8 +222,10 @@ func (checker *healthChecker) patrol(ctx context.Context) ([]string, []string, b
 			}
 			healthState.Set(1)
 			// If the endpoint is healthy, update its last health time.
+			// 如果端点健康，则更新其上次健康时间。
 			checker.storeClient(ep, client, start)
 			// Send the healthy probe result to the channel.
+			// 将健康的探测结果发送到通道。
 			probeCh <- healthProbe{ep, took}
 		}(key, value)
 		return true
@@ -340,6 +365,7 @@ func (checker *healthChecker) filterEps(eps []string) []string {
 	return pickedEps
 }
 
+//定时检查长时间离线,长时间断开,多余的client清理
 func (checker *healthChecker) update() {
 	eps := checker.syncURLs()
 	if len(eps) == 0 {
@@ -357,11 +383,13 @@ func (checker *healthChecker) update() {
 	for ep := range epMap {
 		client := checker.loadClient(ep)
 		if client == nil {
+			//初始化client 添加到healthyClients
 			checker.initClient(ep)
 			continue
 		}
 		since := time.Since(client.lastHealth)
 		// Check if it's offline for a long time and try to remove it.
+		// 检查是否长时间离线，尝试删除。
 		if since > etcdServerOfflineTimeout {
 			log.Info("etcd server might be offline, try to remove it",
 				zap.Duration("since-last-health", since),
@@ -371,6 +399,7 @@ func (checker *healthChecker) update() {
 			continue
 		}
 		// Check if it's disconnected for a long time and try to reconnect.
+		// 检查是否长时间断开，然后尝试重新连接。
 		if since > etcdServerDisconnectedTimeout {
 			log.Info("etcd server might be disconnected, try to reconnect",
 				zap.Duration("since-last-health", since),
@@ -380,6 +409,7 @@ func (checker *healthChecker) update() {
 		}
 	}
 	// Clean up the stale clients which are not in the etcd cluster anymore.
+	// 清理不再位于 etcd 集群中的过时客户端。
 	checker.healthyClients.Range(func(key, value any) bool {
 		ep := key.(string)
 		if _, ok := epMap[ep]; !ok {
@@ -409,6 +439,7 @@ func (checker *healthChecker) loadClient(ep string) *healthyClient {
 }
 
 func (checker *healthChecker) initClient(ep string) {
+	//创建client
 	client, err := newClient(checker.tlsConfig, ep)
 	if err != nil {
 		log.Error("failed to create etcd healthy client",

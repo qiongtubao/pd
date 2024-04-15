@@ -175,6 +175,7 @@ func startGRPCServer(s server, l net.Listener) {
 	defer s.ServerLoopWgDone()
 
 	log.Info("grpc server starts serving", zap.String("address", l.Addr().String()))
+	//启动grpc服务器
 	err := s.GetGRPCServer().Serve(l)
 	if s.IsClosed() {
 		log.Info("grpc server stopped")
@@ -195,7 +196,7 @@ func startHTTPServer(s server, l net.Listener) {
 		log.Fatal("http server stopped unexpectedly", errs.ZapError(err))
 	}
 }
-
+//启动grpc 和http服务器
 // StartGRPCAndHTTPServers starts the grpc and http servers.
 func StartGRPCAndHTTPServers(s server, serverReadyChan chan<- struct{}, l net.Listener) {
 	defer logutil.LogPanic()
@@ -211,10 +212,13 @@ func StartGRPCAndHTTPServers(s server, serverReadyChan chan<- struct{}, l net.Li
 	} else {
 		httpListener = mux.Match(cmux.HTTP1())
 	}
-
+	//grpc 创建server
 	grpcServer := grpc.NewServer()
 	s.SetGRPCServer(grpcServer)
+	//
 	s.RegisterGRPCService(grpcServer)
+	//add (search_log + server_info) method
+	
 	diagnosticspb.RegisterDiagnosticsServer(grpcServer, s)
 	s.ServerLoopWgAdd(1)
 	go startGRPCServer(s, grpcL)

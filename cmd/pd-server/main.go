@@ -193,6 +193,7 @@ func createServerWrapper(cmd *cobra.Command, args []string) {
 }
 
 func start(cmd *cobra.Command, args []string, services ...string) {
+	//注册调度器 
 	schedulers.Register()
 	cfg := config.NewConfig()
 	flagSet := cmd.Flags()
@@ -209,6 +210,7 @@ func start(cmd *cobra.Command, args []string, services ...string) {
 		cmd.Println(err)
 		return
 	} else if printVersion {
+		//打印version 并结束
 		versioninfo.Print()
 		exit(0)
 	}
@@ -217,6 +219,7 @@ func start(cmd *cobra.Command, args []string, services ...string) {
 		cmd.Println(err)
 		return
 	} else if configCheck {
+		//检查config 并结束
 		configutil.PrintConfigCheckMsg(os.Stdout, cfg.WarningMsgs)
 		exit(0)
 	}
@@ -258,6 +261,7 @@ func start(cmd *cobra.Command, args []string, services ...string) {
 		serviceBuilders = append(serviceBuilders, swaggerserver.NewHandler)
 	}
 	serviceBuilders = append(serviceBuilders, dashboard.GetServiceBuilders()...)
+	//创建server
 	svr, err := server.CreateServer(ctx, cfg, services, serviceBuilders...)
 	if err != nil {
 		log.Fatal("create server failed", errs.ZapError(err))
@@ -276,6 +280,7 @@ func start(cmd *cobra.Command, args []string, services ...string) {
 		cancel()
 	}()
 
+	//启动server
 	if err := svr.Run(); err != nil {
 		log.Fatal("run server failed", errs.ZapError(err))
 	}
